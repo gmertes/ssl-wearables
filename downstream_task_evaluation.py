@@ -45,7 +45,7 @@ def train_val_split(X, Y, group, val_size=0.125):
         num_split, test_size=val_size, random_state=41
     ).split(X, Y, groups=group)
     train_idx, val_idx = next(folds)
-    return X[train_idx], X[val_idx], Y[train_idx], Y[val_idx]
+    return X[train_idx], X[val_idx], Y[train_idx], Y[val_idx], group[train_idx], group[val_idx]
 
 
 def set_bn_eval(m):
@@ -116,7 +116,7 @@ def setup_data(train_idxs, test_idxs, X_feats, Y, groups, cfg):
     tmp_X_train, X_test = X_feats[train_idxs], X_feats[test_idxs]
     tmp_Y_train, Y_test = Y[train_idxs], Y[test_idxs]
     group_train, group_test = groups[train_idxs], groups[test_idxs]
-
+    group_val = []
     # when we are not using all the subjects
     if cfg.data.subject_count != -1:
         tmp_X_train, tmp_Y_train, group_train = get_data_with_subject_count(
@@ -141,7 +141,7 @@ def setup_data(train_idxs, test_idxs, X_feats, Y, groups, cfg):
         )
     else:
         # We further divide up train into 70/10 train/val split
-        X_train, X_val, Y_train, Y_val = train_val_split(
+        X_train, X_val, Y_train, Y_val, group_train, group_val = train_val_split(
             tmp_X_train, tmp_Y_train, group_train
         )
 
@@ -176,6 +176,21 @@ def setup_data(train_idxs, test_idxs, X_feats, Y, groups, cfg):
     weights = []
     if cfg.data.task_type == "classify":
         weights = get_class_weights(Y_train)
+
+    try:
+        if cfg.cv_output:
+            cv_path = os.path.join(cfg.logging_path, 'cv_output', '{fold}')
+            pathlib.Path(cv_path.format(fold=fold_counter)).mkdir(parents=True, exist_ok=True)
+
+            cv_out = os.path.join(cv_path, '{name}.npy')
+
+            np.save(cv_out.format(fold=fold_counter, name='group_train'), group_train)
+            np.save(cv_out.format(fold=fold_counter, name='group_val'), group_val)
+            np.save(cv_out.format(fold=fold_counter, name='group_test'), group_test)
+
+    except Exception as e:
+        print(e)
+
     return train_loader, val_loader, test_loader, weights
 
 
@@ -350,6 +365,15 @@ def train_test_mlp(
 
     model.load_state_dict(torch.load(cfg.model_path))
 
+    try:
+        cv_path = os.path.join(cfg.logging_path, 'cv_output', str(fold_counter), 'state_dict.pt')
+        if cfg.multi_gpu:
+            torch.save(model.module.state_dict(), cv_path)
+        else:
+            torch.save(model.state_dict(), cv_path)
+    except Exception as e:
+        print(e)
+
     y_test, y_test_pred, pid_test = mlp_predict(
         model, test_loader, my_device, cfg
     )
@@ -387,7 +411,10 @@ def evaluate_mlp(X_feats, y, cfg, my_device, logger, groups=None):
     folds = get_train_test_split(cfg, X_feats, y, groups)
 
     results = []
+    global fold_counter
+    fold_counter = 0
     for train_idxs, test_idxs in folds:
+        print('Fold', fold_counter)
         result = train_test_mlp(
             train_idxs,
             test_idxs,
@@ -400,6 +427,7 @@ def evaluate_mlp(X_feats, y, cfg, my_device, logger, groups=None):
             encoder=le,
         )
         results.extend(result)
+        fold_counter += 1
 
     pathlib.Path(cfg.report_root).mkdir(parents=True, exist_ok=True)
     classification_report(results, cfg.report_path)
@@ -814,4 +842,5 @@ def main(cfg):
 
 
 if __name__ == "__main__":
+    fold_counter = 0
     main()
